@@ -1,0 +1,614 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jul  8 20:22:30 2022
+
+@author: Administrator
+"""
+
+import argparse
+from threading import Semaphore
+import threading
+from dask.distributed import Client
+import numpy as np
+import pandas as pd
+import dask.dataframe as dd
+import os
+from scipy import stats
+import os
+import multiprocessing
+from statsmodels.stats.multitest import multipletests
+import pandas as pd
+import copy
+import matplotlib.pyplot as plt
+
+__author__ = "Bu Qing, Zuo Zhihao"
+__copyright__ = ""
+__credits__ = [""]
+__license__ = ""
+__maintainer__ = ""
+__email__ = "940260486@qq.com"
+__status__ = "Development"
+__version__ = "1.0.0"
+
+###########################################过滤
+
+def parse_args():
+    
+    # Creating the parse object
+    
+    parser = argparse.ArgumentParser(description= "##Methylstat is a convenient tool for analyzing and annotating DNA methylation information obtained from whole genome bisulfite sequencing.##")
+    
+    # Add the version option
+    parser.add_argument("-v", "--version", action="version", version="%(prog)s {}".format(__version__))
+    
+    # The input options
+    
+    group = parser.add_argument_group("basics optons")
+    
+    # The input file (for two file)
+    
+    group.add_argument("--split", type=str, metavar="FILE", help="Classify the files by methylation type and export the files")
+    
+    group.add_argument("--test1", type=str, metavar="FILE", help="Control group file")
+    
+    group.add_argument("--test2", type=str, metavar="FILE", help="Deal group file")
+    
+    # Methylation type
+    
+    group.add_argument("--mtype", type=str, help="Methylation type, eg.CHG, CHH")
+    
+    group.add_argument("--step", type=int, help="step size")
+    
+    group.add_argument("--window", type=int, help="sliding window")
+    
+    group.add_argument("--coverage", type=int, help="Minimum methylation coverage")
+    
+    # Finding differentially methylated regions
+    
+    group = parser.add_argument_group("Finding differentially methylated regions")
+    
+    group.add_argument("--ari", type=str, help="An algorithm for calculating differential methylation regions")
+    
+    group.add_argument("--padj", type=str, help="The manipulation of p value correction:fdr_bh, fdr_by, holm, hommel", default="fdr_bh")
+    
+    group.add_argument("--thread", type=int, help="Set the number of thread")
+    
+    group.add_argument("--pthre", type=int, help="Set the threshold of p-value", default=0.05)
+    
+    group.add_argument("--diffthre", type=int, help="Set the threshold of methdiff", default=0.25)
+    
+    # Draw statistical chart
+    
+    group = parser.add_argument_group("Draw statistical chart")
+    
+    group.add_argument("--plot", type=str, help="Draw statistical chart")
+    
+    group.add_argument("--files", type=str, help="Draw statistical files")
+    
+    group.add_argument("--files_type", type=str, help="Type of draw statistical files")
+    
+    group.add_argument("--gtf", type=str, help="Gene annotation file")
+    
+    group.add_argument("--tes_gtf", type=str, help="Transposon comment file")
+    
+    
+     
+    return parser.parse_args()
+
+def logo():
+    
+    print("="*92 + "\n")
+    
+    print("\n __        __     _________     _________     __       __      __       __      __\n|  \      /  |   |  _______|   |___   ___|   |  |     |  |     \ \     / /     |  |\n| |\\\\    //| |   | |               | |       |  |     |  |      \\ \\   / /      |  |\n| | \\\\__// | |   | |_______        | |       |  |_____|  |       \\ \\_/ /       |  |\n| |  \\__/  | |   |  _______|       | |       |   _____   |        \\ _ /        |  |\n| |        | |   | |               | |       |  |     |  |         | |         |  |\n| |        | |   | |_______        | |       |  |     |  |         | |         |  |_______\n|_|        |_|   |_________|       |_|       |__|     |__|         |_|         |__________|\n")
+    
+    print("="*92 + "\n")
+    
+def split_file(file_split):
+    
+    """Split files by methylated type"""
+    
+    print("Split files by methylated type")
+    
+    file_list = file_split.split(",")
+    
+    def go(file_name):
+        
+        file = open(file_name)
+        
+        name_b = file_name.split(".")[0]
+        
+        file_CG = open(name_b+"_CG.txt", "w")
+    
+        file_CHH = open(name_b+"_CHH.txt", "w")
+    
+        file_CHG = open(name_b+"_CHG.txt", "w")
+        
+        for j in file:
+            
+            name = j.split("\t")
+            
+            type_a = name[5]
+            
+            if type_a == "CG":
+    
+                file_CG.write(j)
+    
+            elif type_a == "CHH":
+    
+                file_CHH.write(j)
+    
+            elif type_a == "CHG":
+    
+                file_CHG.write(j)
+                
+        s.release()
+        
+        file_CG, file_CHH, file_CHG.close()   
+            
+    s = Semaphore(len(file_list))
+            
+    for i in file_list:
+        
+        s.acquire()
+        
+        t = threading.Thread(target=go, args=(i,))
+        
+        t.start() 
+        
+def read_testfile(test_1, test_2):
+    
+    print("Reading input file")
+    
+    test1 = test_1.split(",")
+
+    test2 = test_2.split(",")
+    
+    test1_lis_meth = []
+
+    test1_lis_unmeth = []
+
+    for o,i in enumerate(test1):
+    
+        if o == 0:
+    
+            merge1 = dd.read_table(i, header=None, usecols=[0, 1, 3, 4])
+
+            merge1.columns = ["Chr", "Pos",  "Meth_0_%d" % o, "Unmeth_0_%d" % o]
+
+            chrs = merge1["Chr"].unique()
+        
+        else:
+        
+            file1 = dd.read_table(i, header=None, usecols=[0, 1, 3, 4])
+        
+            file1.columns = ["Chr", "Pos",  "Meth_0_%d" % o, "Unmeth_0_%d" % o]
+        
+            merge1 = dd.merge(merge1, file1, on=["Chr", "Pos"])
+        
+        test1_lis_meth.append("Meth_0_%d" % o)
+    
+        test1_lis_unmeth.append("Unmeth_0_%d" % o)
+    
+    merge1["Meth_0"] = merge1.loc[:, test1_lis_meth].sum(axis=1)
+
+    merge1["Unmeth_0"] = merge1.loc[:, test1_lis_unmeth].sum(axis=1)
+    
+    test2_lis_meth = []
+
+    test2_lis_unmeth = []
+        
+    for o,i in enumerate(test2):
+    
+        if o == 0:
+    
+            merge2 = dd.read_table(i, header=None, usecols=[0, 1, 3, 4])
+
+            merge2.columns = ["Chr", "Pos",  "Meth_1_%d" % o, "Unmeth_1_%d" % o]
+
+        
+        else:
+        
+            file1 = dd.read_table(i, header=None, usecols=[0, 1, 3, 4])
+        
+            file1.columns = ["Chr", "Pos",  "Meth_1_%d" % o, "Unmeth_1_%d" % o]
+        
+            merge2 = dd.merge(merge2, file1, on=["Chr", "Pos"])        
+        
+        test2_lis_meth.append("Meth_1_%d" % o)
+    
+        test2_lis_unmeth.append("Unmeth_1_%d" % o)
+
+    merge2["Meth_1"] = merge2.loc[:, test2_lis_meth].sum(axis=1)
+
+    merge2["Unmeth_1"] = merge2.loc[:, test2_lis_unmeth].sum(axis=1)
+
+    merge_fin = dd.merge(merge1.loc[:,["Chr", "Pos", "Meth_0", "Unmeth_0"]], merge2.loc[:,["Chr", "Pos", "Meth_1", "Unmeth_1"]], on=["Chr", "Pos"])
+    
+    return merge_fin, chrs
+
+    
+        
+def win_step(merge_fin, win, step, chrs):
+    
+    """Set the step size and the reading window"""
+    
+    print("Set the step size and the reading window")
+    
+    nums = win % step
+
+    if nums == 0:
+    
+        num = win // step
+    
+    else:
+    
+        num = win//step + 1
+        
+    def x(x):
+        
+        "Launch the sliding window"
+         
+        if x%step == 0:
+            
+            start = (x//(step)-1)*step + 1 
+            
+        else:
+        
+            start = x // step * step + 1
+        
+        end = start + win - 1
+         
+        lis_1 = []
+    
+        lis_1.append(start)
+        
+        for i in range(num-1):
+            
+            sig1 = start-step*(i+1)
+        
+            lis_1.append(sig1)
+        
+        if win//step == 0:
+        
+            return lis_1
+    
+        else:
+        
+            if x > int(lis_1[-1]) + win -1:
+            
+                print(1)
+            
+                return lis_1[:-1]
+        
+            else:
+                return lis_1  
+            
+    merge_fin = merge_fin
+        
+    merge_fin["Win"] = merge_fin["Pos"].map(x)
+    
+    for b,c in enumerate(chrs):
+    
+        file1_chr = merge_fin[merge_fin["Chr"] == c]
+    
+        for k in range(num):
+    
+            if k == 0:
+        
+                con = file1_chr[["Meth_0", "Unmeth_0","Meth_1", "Unmeth_1"]].groupby(file1_chr["Win"].str[k]).sum()
+        
+            else:
+    
+               xx = file1_chr[["Meth_0", "Unmeth_0","Meth_1", "Unmeth_1"]].groupby(file1_chr["Win"].str[k]).sum()
+    
+               con = dd.concat([con, xx])
+        
+        if b == 0:
+        
+            zhong = con.groupby(con.index).sum()
+        
+            zhong["Chr"] = c
+        
+        else:
+        
+            lin = con.groupby(con.index).sum()
+        
+            lin["Chr"] = c
+        
+            zhong = dd.concat([zhong, lin])
+
+    le = len(zhong)
+
+    zhong_com = zhong.compute()
+
+    zhong_com.to_csv("merge_win.txt",sep="\t", index=None)
+    
+    return le
+
+def statistics(le, thread_num):
+    
+    "Statistical tests and screening based on thresholds"
+    
+    print("Statistical tests and screening based on thresholds")
+    
+    os.mkdir("merge/")
+
+    chunsize = le//thread_num + 1
+
+    file_s = pd.read_table("merge_win.txt", chunksize=chunsize)
+
+    def fisher(i):
+    
+        xx = stats.fisher_exact([[i["Meth_0"], i["Unmeth_0"]], [i["Meth_1"], i["Unmeth_1"]]])
+    
+        return xx[1]
+
+    def pcunt(ff,num):
+    
+        ff["p-value"] = ff.apply(fisher, axis="columns")
+    
+        ff["meth_diff"] = ff["Meth_1"]/(ff["Meth_1"]+ff["Unmeth_1"]) - ff["Meth_0"]/(ff["Meth_0"]+ff["Unmeth_0"])
+    
+        ff.to_csv("merge/%d.txt" % num, sep="\t", index=None)
+
+    for n,j in enumerate(file_s):
+    
+        t = multiprocessing.Process(target=pcunt, args=(j,n))
+    
+        t.start() 
+        
+        t.jion()
+
+def merge(p_sel, diff_sel):
+    
+    file_lis = os.listdir("merge")
+
+    zhong_merge = pd.DataFrame()
+ 
+    for file_mer in file_lis:
+    
+        file_smal = pd.read_csv("merge/%s" % file_mer)
+    
+        zhong_merge = pd.concat([zhong_merge, file_smal])
+    
+    zhong_merge["padj"] = multipletests(zhong_merge["p-value"], method="fdr_bh")[1]
+
+    zhong_merge_sort = zhong_merge.sort_values(by=["Chr", "Win"])
+    
+    zhong_merge_sort.to_csv("result_all.txt", sep="\t", index=None)
+    
+    zhong_merge_sort_sel = zhong_merge_sort[(zhong_merge_sort["p-value"] < p_sel) & (zhong_merge_sort["meth_diff"].abs() >diff_sel)]
+    
+    zhong_merge_sort_sel.to_csv("result_sel.txt", sep="\t", index=None)
+    
+
+def plot_eff(gtf, tes_gtf, file_list, type_list):
+
+    file_gene = pd.read_table(gtf, header=None)
+    
+    file_gene["type"] = "gene"
+    
+    file_gene = file_gene[file_gene[2] == "transcript"]
+    
+    file_gene["gene_name"] = file_gene[8].str.findall("(?<=gene_id \").*?(?=\";)").str[0]
+    
+    file_gene = file_gene.drop_duplicates(["gene_name"])
+    
+    del file_gene["gene_name"]
+    
+    file_trans = pd.read_table(tes_gtf, header=None)
+    
+    file_trans["type"] = "trans"
+    
+    file_trans = file_trans[file_trans[2] == "transcript"]
+    
+    lis_zhong_start = []
+    
+    lis_zhong_end = []
+    
+    for i, j in file_gene.iterrows():
+        
+        if j[6] == "-":
+            
+            lis_zhong_start.append(j[4])
+            
+            lis_zhong_end.append(j[4]+2000)
+            
+        if j[6] == "+":
+            
+            lis_zhong_start.append(j[3] - 2000)
+            
+            lis_zhong_end.append(j[3])
+    
+    file_pro = copy.deepcopy(file_gene)
+    
+    file_pro[3], file_pro[4] = lis_zhong_start, lis_zhong_end
+    
+    file_pro["type"] = "pro" 
+            
+    file_zhong = pd.concat([file_gene, file_trans, file_pro])
+    
+    file_zhong_group = file_zhong.groupby([0])
+    
+    def eff(types, file_names, dirs):
+        
+        sig = types
+        
+        file_DMR = pd.read_table(file_names)
+        
+        if dirs == "+":
+        
+            file_DMR = file_DMR[file_DMR["meth_diff"] > 0]
+            
+        else:
+            
+            file_DMR = file_DMR[file_DMR["meth_diff"] < 0]
+    
+        file_DMR["pos"] = (file_DMR["start"] + file_DMR["end"])//2
+    
+        file_DMR["sig"] = file_DMR["chr"] +"_"+ file_DMR["pos"].astype("str")
+        
+        zhong_TE = pd.DataFrame()
+    
+        zhong_gene = pd.DataFrame()
+    
+        zhong_pro = pd.DataFrame()
+    
+        zhong_NA = pd.DataFrame()
+        
+        for k,l in file_zhong_group:
+            
+            file_DMR_chr = file_DMR[file_DMR["chr"] == k]
+            
+            for z,o in file_DMR_chr.iterrows():
+                
+                pos = o["pos"]
+                
+                shai_1 = l[l[3] < pos]
+                
+                shai_2 = shai_1[shai_1[4] > pos]
+                
+                #print(len(shai_2))
+                
+                if len(shai_2) == 0:
+                    
+                    x = pd.DataFrame(o).T
+                    
+                    zhong_NA = pd.concat([zhong_NA, x])
+                    
+                else:
+                    
+                    shai_2["sig"] = o.iloc[-1]
+                    
+                    set_zhen = set(shai_2["type"])
+                    
+                    if len(set_zhen) == 1:
+                    
+                        if shai_2.iloc[0, -2] == "gene":
+                        
+                            zhong_gene = pd.concat([zhong_gene, shai_2])
+                        
+                        if shai_2.iloc[0, -2] == "pro":
+                        
+                            zhong_pro = pd.concat([zhong_pro, shai_2])
+                        
+                        if shai_2.iloc[0, -2] == "trans":
+                        
+                            zhong_TE = pd.concat([zhong_TE, shai_2])
+                            
+                    else:
+                        
+                        lis_zhen = list(shai_2["type"])
+                        
+                        if sig in ["CG", "CHG"]:
+                            
+                            if set_zhen == {"pro", "trans"}:
+                                
+                                zhong_TE = pd.concat([zhong_TE, shai_2])
+                                
+                            else:
+                                
+                                zhong_gene = pd.concat([zhong_gene, shai_2])
+                                
+                        else:
+    
+                            
+                            if set_zhen == {"gene", "trans"}:
+                                
+                                zhong_TE = pd.concat([zhong_TE, shai_2])
+                                
+                            else:
+                                
+                                zhong_pro = pd.concat([zhong_pro, shai_2])
+    
+        zhong_TE_dup = zhong_TE[zhong_TE["type"] == "trans"].drop_duplicates(["sig"])
+        
+        zhong_gene_dup = zhong_gene[zhong_gene["type"] == "gene"].drop_duplicates(["sig"])
+        
+        zhong_pro_dup = zhong_pro[zhong_pro["type"] == "pro"].drop_duplicates(["sig"])
+        
+        name_col = "fre_%s_%s" % (sig, dirs)
+           
+        zhong_TE.to_csv("注释_TE_"+name_col+".csv", index=None)
+        
+        zhong_gene.to_csv("注释__gene_"+name_col+".csv", index=None)
+        
+        zhong_pro.to_csv("注释_pro_"+name_col+".csv", index=None)
+        
+        zhong_NA.to_csv("注释_NA_"+name_col+".csv", index=None)
+        
+        zhong_zhong = {}
+        
+        len_all = len(file_DMR)
+        
+        zhong_zhong["TE"] = [len(zhong_TE_dup), len(zhong_TE_dup)/len_all]
+                
+        zhong_zhong["gene"] = [len(zhong_gene_dup), len(zhong_gene_dup)/len_all]
+        
+        zhong_zhong["pro"] = [len(zhong_pro_dup), len(zhong_pro_dup)/len_all]
+        
+        zhong_zhong["NA"] = [len(zhong_NA), len(zhong_NA)/len_all]
+        
+        zhong_zhong_zhong = pd.DataFrame(zhong_zhong, index=["num", "fre"]).T
+              
+        zhong_zhong_zhong[name_col] = zhong_zhong_zhong["fre"]
+        
+        zhong_return = zhong_zhong_zhong[name_col].T
+        
+        return zhong_return
+            
+    file_list = file_list.split(",")
+    
+    type_list=type_list.split(",")
+    
+    file_plot = pd.DataFrame()
+    
+    for i,j in zip(file_list, type_list):
+        
+        dirs_all = ["+", "-"]
+        
+        for x in dirs_all:
+        
+            file_unmerge = eff(j, i, x)
+            
+            file_plot = pd.concat([file_plot, file_unmerge], axis=0)
+        
+    file_plot.to_csv("汇总.csv")    
+    
+    fig, axis = plt.subplots()
+    
+    file_plot.plot.barh(stacked=True,ax=axis)
+    
+    fig.savefig("stacked_plot.pdf", format="pdf", bbox_inches = 'tight') 
+    
+def main():
+    """The main method of the program."""
+    
+    logo()
+          
+    # Getting and checking the options
+    args = parse_args()
+    
+    if args.split:
+        
+        split_file(args.split)
+        
+    if args.plot:
+        
+        plot_eff(args.gtf, args.tes_gtf, args.files, args.files_type)
+    
+    else:
+    
+        file_test_merge, chrs_num = read_testfile(args.test1, args.test2)
+    
+        le = win_step(file_test_merge, args.window, args.step, chrs_num)
+    
+        statistics(le, args.thread)   
+        
+        merge(args.pthre, args.diffthre)
+    
+    
+if __name__ == "__main__":
+    
+    main()    
+    
